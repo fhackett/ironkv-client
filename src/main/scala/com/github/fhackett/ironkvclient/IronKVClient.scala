@@ -91,6 +91,38 @@ final class IronKVClient private (configFile: os.Path, timeout: Int, debug: Bool
     }
   }
 
+  private implicit final class SocketChannelHelper(channel: SocketChannel) {
+    def readAll(buffer: ByteBuffer): Unit = {
+      val bytesExpected = buffer.remaining()
+      val bytesRead = Iterator.continually {
+        withTimeout(channel) {
+          channel.read(buffer)
+        }
+      }
+        .scanLeft(0)(_ + _)
+        .find(_ == bytesExpected)
+        .get
+
+      assert(bytesRead == bytesExpected, s"read $bytesRead, but expected $bytesExpected")
+      assert(buffer.remaining() == 0, s"buffer had non-zero bytes remaining ${buffer.remaining()}")
+    }
+
+    def writeAll(buffer: ByteBuffer): Unit = {
+      val bytesExpected = buffer.remaining()
+      val bytesWritten = Iterator.continually {
+        withTimeout(channel) {
+          channel.write(buffer)
+        }
+      }
+        .scanLeft(0)(_ + _)
+        .find(_ == bytesExpected)
+        .get
+
+      assert(bytesWritten == bytesExpected, s"wrote $bytesWritten, but expected $bytesExpected")
+      assert(buffer.remaining() == 0, s"buffer had non-zero bytes remaining ${buffer.remaining()}")
+    }
+  }
+
   private object socket {
     private val random = new Random()
     private var channel: Option[SocketChannel] = None
@@ -115,10 +147,8 @@ final class IronKVClient private (configFile: os.Path, timeout: Int, debug: Bool
         val expectedBytesWritten = lenBuffer.remaining() + totalRemaining
         val sentBytes = (Iterator.single(lenBuffer) ++ bufs.iterator).map(bufferBytes).reduce(_ ++ _)
         println(s"send ${asHex(sentBytes)}")
-        val bytesWritten = withTimeout(channel) {
-          channel.write(lenBuffer +: bufs)
-        }
-        assert(bytesWritten == expectedBytesWritten)
+        channel.writeAll(lenBuffer)
+        bufs.foreach(channel.writeAll)
         println("sent")
 
         channel
@@ -179,10 +209,7 @@ final class IronKVClient private (configFile: os.Path, timeout: Int, debug: Bool
       Try {
         lenBuffer.clear()
         println("try recv")
-        val lenBytesRead = withTimeout(channel) {
-          channel.read(lenBuffer)
-        }
-        assert(lenBytesRead == 8)
+        channel.readAll(lenBuffer)
         val responseLen = lenBuffer.flip().getLong()
         println(s"rlen $responseLen")
 
@@ -197,14 +224,12 @@ final class IronKVClient private (configFile: os.Path, timeout: Int, debug: Bool
           .clear()
           .limit(responseLen.toInt)
 
-
-        val respBytesRead = withTimeout(channel) {
-          channel.read(responseBuffer)
-        }
-        assert(respBytesRead == responseLen)
+        channel.readAll(responseBuffer)
 
         responseBuffer.flip()
+        assert(responseBuffer.remaining() == responseLen, s"expected $responseLen bytes in buffer, got ${responseBuffer.remaining()}")
         println(s"recv ${asHex(bufferBytes(responseBuffer))}")
+        assert(responseBuffer.remaining() == responseLen)
         responseBuffer
       }
 
